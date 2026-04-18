@@ -9,6 +9,7 @@
 
         public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
         public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+        public DateTimeOffset? DeletedAt { get; set; }
 
         private UserProfile() { } // EF Core
 
@@ -19,6 +20,12 @@
             LastName = lastName;
             CreatedAt = DateTimeOffset.UtcNow;
             UpdatedAt = DateTimeOffset.UtcNow;
+            DeletedAt = null;
+        }
+
+        public void Delete()
+        {
+            DeletedAt = DateTimeOffset.UtcNow;
         }
     }
 }

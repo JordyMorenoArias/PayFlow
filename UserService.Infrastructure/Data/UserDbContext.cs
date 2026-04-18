@@ -38,6 +38,8 @@ namespace UserService.Infrastructure.Data
                 entity.Property(e => e.UpdatedAt)
                     .IsRequired();
 
+                entity.Property(e => e.DeletedAt);
+
                 entity.HasIndex(e => e.CreatedAt);
             });
         }

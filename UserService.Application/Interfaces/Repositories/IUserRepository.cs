@@ -36,10 +36,9 @@ namespace UserService.Application.Interfaces.Repositories
         /// <summary>
         /// Asynchronously creates a new user profile in the data store.
         /// </summary>
-        /// <param name="userProfile">The user profile to create. Cannot be null. All required fields must be populated.</param>
-        /// <returns>A task that represents the asynchronous operation. The task result contains the created user profile,
-        /// including any server-assigned fields.</returns>
-        Task<UserProfile> CreateAsync(UserProfile userProfile);
+        /// <param name="userProfile">The user profile to create. Cannot be null.</param>
+        /// <returns>A task that represents the asynchronous create operation.</returns>
+        Task CreateAsync(UserProfile userProfile);
 
         /// <summary>
         /// Asynchronously updates the specified user profile in the data store.

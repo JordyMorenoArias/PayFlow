@@ -1,9 +1,11 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using SharedKernel.Pagination;
 using UserService.Application.DTOs;
+using UserService.Application.Exceptions;
 using UserService.Application.Interfaces.Repositories;
 using UserService.Domain.Entities;
 using UserService.Infrastructure.Data;
+using UserService.Infrastructure.Persistence;
 
 namespace UserService.Infrastructure.Repositories
 {
@@ -18,22 +20,32 @@ namespace UserService.Infrastructure.Repositories
     public class EFUserRepository : IUserRepository
     {
         private readonly UserDbContext _context;
+        private readonly IDatabaseExceptionDetector _detector;
 
-        EFUserRepository(UserDbContext context)
+        EFUserRepository(UserDbContext context, IDatabaseExceptionDetector detector)
         {
             this._context = context;
+            this._detector = detector;
         }
 
         /// <summary>
-        /// Asynchronously creates a new user profile and saves it to the data store.
+        /// Asynchronously creates a new user profile in the data store.
         /// </summary>
-        /// <param name="userProfile">The user profile to create. Cannot be null.</param>
-        /// <returns>A task that represents the asynchronous operation. The task result contains the created user profile.</returns>
-        public async Task<UserProfile> CreateAsync(UserProfile userProfile)
+        /// <param name="userProfile">The user profile to add. Cannot be null. The profile's properties should satisfy any required constraints,
+        /// such as unique fields.</param>
+        /// <returns>A task that represents the asynchronous create operation.</returns>
+        /// <exception cref="DuplicateEntityException">Thrown if a user profile with the same unique fields already exists.</exception>
+        public async Task CreateAsync(UserProfile userProfile)
         {
-            _context.Users.Add(userProfile);
-            await _context.SaveChangesAsync();
-            return userProfile;
+            try
+            {
+                _context.Users.Add(userProfile);
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException ex) when (_detector.IsUniqueConstraintViolation(ex))
+            {
+                throw new DuplicateEntityException("User profile already exists.");
+            }
         }
 
         /// <summary>

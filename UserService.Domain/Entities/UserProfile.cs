@@ -23,6 +23,13 @@
             DeletedAt = null;
         }
 
+        public void Update(string firstName, string lastName)
+        {
+            FirstName = firstName;
+            LastName = lastName;
+            UpdatedAt = DateTimeOffset.UtcNow;
+        }
+
         public void Delete()
         {
             DeletedAt = DateTimeOffset.UtcNow;

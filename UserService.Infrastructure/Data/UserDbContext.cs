@@ -17,7 +17,7 @@ namespace UserService.Infrastructure.Data
 
             modelBuilder.Entity<UserProfile>(entity =>
             {
-                entity.ToTable("users");
+                entity.ToTable("user_profiles");
 
                 entity.HasKey(e => e.Id);
 
@@ -41,6 +41,8 @@ namespace UserService.Infrastructure.Data
                 entity.Property(e => e.DeletedAt);
 
                 entity.HasIndex(e => e.CreatedAt);
+
+                entity.HasIndex(e => e.DeletedAt);
             });
         }
 

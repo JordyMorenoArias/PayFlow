@@ -3,19 +3,19 @@ using UserService.Domain.Entities;
 
 namespace UserService.Infrastructure.Data
 {
-    public class UserServiceContext : DbContext
+    public class UserDbContext : DbContext
     {
-        public UserServiceContext(DbContextOptions<UserServiceContext> options) : base(options)
+        public UserDbContext(DbContextOptions<UserDbContext> options) : base(options)
         {
         }
 
-        public DbSet<UserEntity> Users { get; set; }
+        public DbSet<UserProfile> Users { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
 
-            modelBuilder.Entity<UserEntity>(entity =>
+            modelBuilder.Entity<UserProfile>(entity =>
             {
                 entity.ToTable("users");
 
@@ -32,23 +32,11 @@ namespace UserService.Infrastructure.Data
                     .IsRequired()
                     .HasMaxLength(100);
 
-                entity.Property(e => e.Email)
-                    .IsRequired()
-                    .HasMaxLength(100)
-                    .IsUnicode(false);
-
-                entity.Property(e => e.PasswordHash)
-                    .IsRequired()
-                    .HasMaxLength(500);
-
                 entity.Property(e => e.CreatedAt)
                     .IsRequired();
 
                 entity.Property(e => e.UpdatedAt)
                     .IsRequired();
-
-                entity.HasIndex(e => e.Email)
-                    .IsUnique();
 
                 entity.HasIndex(e => e.CreatedAt);
             });
@@ -56,7 +44,7 @@ namespace UserService.Infrastructure.Data
 
         public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
         {
-            var entries = ChangeTracker.Entries<UserEntity>();
+            var entries = ChangeTracker.Entries<UserProfile>();
             foreach (var entry in entries)
             {
                 if (entry.State == EntityState.Added)

@@ -1,5 +1,7 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
+using UserService.Application.Interfaces.Services;
 using UserService.Application.Mappings;
+using UserService.Application.Services;
 
 namespace UserService.Application
 {
@@ -14,7 +16,7 @@ namespace UserService.Application
             });
 
             // Aquí puedes registrar otros servicios de aplicación
-            // services.AddScoped<IUserService, UserService>();
+            services.AddScoped<IUserService, DefaultUserService>();
 
             return services;
         }

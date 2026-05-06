@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Polly;
 using Polly.CircuitBreaker;
 using Polly.Retry;
@@ -16,6 +17,7 @@ namespace AuthService.Infrastructure.Messaging
     {
         private readonly ILogger<RabbitConnection> _logger;
         private readonly IConnectionFactory _connectionFactory;
+        private readonly CancellationToken _appStopping;
         private IConnection? _connection;
         private bool _disposed;
 
@@ -24,21 +26,22 @@ namespace AuthService.Infrastructure.Messaging
         // Polly policies
         private readonly ResiliencePipeline _resiliencePipeline;
 
-        public RabbitConnection(IConnectionFactory connectionFactory, ILogger<RabbitConnection> logger)
+        public RabbitConnection(
+            IConnectionFactory connectionFactory,
+            ILogger<RabbitConnection> logger,
+            IHostApplicationLifetime appLifetime)
         {
             _connectionFactory = connectionFactory;
             _logger = logger;
+            _appStopping = appLifetime.ApplicationStopping;
 
-            var jitter = new Random();
-
-            // Polly configuration: Exponential backoff with jitter for retries, and a circuit breaker to prevent overwhelming the server
             var retryOptions = new RetryStrategyOptions
             {
                 MaxRetryAttempts = 5,
                 DelayGenerator = args =>
                 {
                     var exponential = Math.Pow(2, args.AttemptNumber);
-                    var jitterMs = jitter.Next(0, 1000);
+                    var jitterMs = Random.Shared.Next(0, 1000);
 
                     return new ValueTask<TimeSpan?>(
                         TimeSpan.FromSeconds(exponential) + TimeSpan.FromMilliseconds(jitterMs));
@@ -50,15 +53,19 @@ namespace AuthService.Infrastructure.Messaging
                     ),
                 OnRetry = args =>
                 {
-                    _logger.LogWarning("[Retry {AttemptNumber}] {ExceptionMessage}", args.AttemptNumber, args.Outcome.Exception?.Message);
+                    _logger.LogWarning(
+                        "[Retry {AttemptNumber}] {ExceptionMessage}",
+                        args.AttemptNumber,
+                        args.Outcome.Exception?.Message);
                     return default;
                 }
             };
 
-            // The circuit breaker will open if 50% of the last 3 attempts fail, and will stay open for 30 seconds before trying again
+            // The circuit breaker will open if 50% of the last 3 attempts fail,
+            // and will stay open for 30 seconds before trying again.
             var circuitBreakerOptions = new CircuitBreakerStrategyOptions
             {
-                FailureRatio = 0.5, // 50% failures
+                FailureRatio = 0.5,
                 MinimumThroughput = 3,
                 BreakDuration = TimeSpan.FromSeconds(30),
                 ShouldHandle = args =>
@@ -68,7 +75,9 @@ namespace AuthService.Infrastructure.Messaging
                     ),
                 OnOpened = args =>
                 {
-                    _logger.LogWarning("[Circuit OPEN] {BreakDuration}s", args.BreakDuration.TotalSeconds);
+                    _logger.LogWarning(
+                        "[Circuit OPEN] Break duration: {BreakDurationSeconds}s",
+                        args.BreakDuration.TotalSeconds);
                     return default;
                 },
                 OnClosed = args =>
@@ -93,23 +102,27 @@ namespace AuthService.Infrastructure.Messaging
             _connection != null && _connection.IsOpen && !_disposed;
 
         /// <summary>
-        /// Attempts to establish a connection to RabbitMQ, with retries and circuit breaker handling, and supports cancellation.
+        /// Attempts to establish a connection to RabbitMQ, with retries and circuit breaker
+        /// handling, and supports cancellation.
         /// </summary>
         /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
-        /// <returns> True if connection is established, false otherwise.</returns>
+        /// <returns>True if connection is established, false otherwise.</returns>
         public async Task<bool> TryConnectAsync(CancellationToken cancellationToken = default)
         {
             if (_disposed) return false;
 
-            if (IsConnected)
-                return true;
+            if (IsConnected) return true;
 
-            await _connectionLock.WaitAsync(cancellationToken);
+            // [FIX 1] Link the incoming token with the app stopping token so any shutdown
+            // cancels an in-progress connection attempt immediately.
+            using var linkedCts = CancellationTokenSource
+                .CreateLinkedTokenSource(cancellationToken, _appStopping);
+
+            await _connectionLock.WaitAsync(linkedCts.Token);
 
             try
             {
-                if (IsConnected)
-                    return true;
+                if (IsConnected) return true;
 
                 return await _resiliencePipeline.ExecuteAsync(async token =>
                 {
@@ -117,14 +130,14 @@ namespace AuthService.Infrastructure.Messaging
                     {
                         var connection = await _connectionFactory.CreateConnectionAsync(token);
 
-                        // Extra validation 
                         if (connection is null || !connection.IsOpen)
                         {
                             _logger.LogWarning("Connection created but not open");
                             return false;
                         }
 
-                        // cleaning up old connection if exists
+                        // [FIX 3] Unsubscribe events before disposing the old connection
+                        // to prevent stale callbacks firing after replacement.
                         if (_connection != null)
                         {
                             try
@@ -132,7 +145,6 @@ namespace AuthService.Infrastructure.Messaging
                                 _connection.ConnectionShutdownAsync -= OnConnectionShutdownAsync;
                                 _connection.CallbackExceptionAsync -= OnCallbackExceptionAsync;
                                 _connection.ConnectionBlockedAsync -= OnConnectionBlockedAsync;
-
                                 _connection.Dispose();
                             }
                             catch { /* swallow */ }
@@ -140,31 +152,35 @@ namespace AuthService.Infrastructure.Messaging
 
                         _connection = connection;
 
-                        // subscribe to events
                         _connection.ConnectionShutdownAsync += OnConnectionShutdownAsync;
                         _connection.CallbackExceptionAsync += OnCallbackExceptionAsync;
                         _connection.ConnectionBlockedAsync += OnConnectionBlockedAsync;
 
-                        _logger.LogWarning("RabbitMQ connected");
+                        _logger.LogInformation("RabbitMQ connected successfully");
 
                         return true;
                     }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Failed to connect to RabbitMQ");
-                        throw; // important to rethrow so Polly can handle it
+                        throw;
                     }
 
-                }, cancellationToken);
+                }, linkedCts.Token);
             }
             catch (BrokenCircuitException)
             {
-                _logger.LogWarning("Circuit is open, skipping connection attempt"); 
+                _logger.LogWarning("Circuit is open, skipping connection attempt");
+                return false;
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Connection attempt cancelled");
                 return false;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning($"Error connecting: {ex.Message}");
+                _logger.LogWarning("Error connecting to RabbitMQ: {ExceptionMessage}", ex.Message);
                 return false;
             }
             finally
@@ -174,36 +190,38 @@ namespace AuthService.Infrastructure.Messaging
         }
 
         /// <summary>
-        /// Creates a new channel on the existing RabbitMQ connection. If the connection is not established, it will attempt to connect first.
+        /// Creates a new channel on the existing RabbitMQ connection. If the connection is not
+        /// established, it will attempt to connect first.
         /// </summary>
-        /// <returns> A task that represents the asynchronous operation, containing the created channel.</returns>
+        /// <param name="cancellationToken">A token to monitor for cancellation requests.</param> 
+        /// <returns>A task containing the created channel.</returns>
         /// <exception cref="InvalidOperationException"></exception>
-        public async Task<IChannel> CreateChannelAsync()
+        public async Task<IChannel> CreateChannelAsync(CancellationToken cancellationToken = default) 
         {
             if (!IsConnected)
             {
-                var connected = await TryConnectAsync();
+                var connected = await TryConnectAsync(cancellationToken);
 
                 if (!connected)
                     throw new InvalidOperationException("Failed to establish a connection with RabbitMQ");
             }
 
-            return await _connection!.CreateChannelAsync();
+            return await _connection!.CreateChannelAsync(cancellationToken: cancellationToken);
         }
 
         /// <summary>
-        /// Handles the ConnectionShutdown event from RabbitMQ. If the shutdown was initiated by the peer or the library, it will attempt to reconnect.
+        /// Handles the ConnectionShutdown event. Reconnects when the shutdown was initiated by
+        /// the peer or the library (not by the application itself).
         /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
-        /// <returns> A task that represents the asynchronous operation.</returns>
         private async Task OnConnectionShutdownAsync(object sender, ShutdownEventArgs e)
         {
             if (_disposed) return;
 
-            _logger.LogWarning($"Shutdown: {e.ReplyText}");
+            _logger.LogWarning(
+                "RabbitMQ connection shutdown. Initiator: {Initiator}, Reason: {ReplyText}",
+                e.Initiator,
+                e.ReplyText);
 
-            // only attempt to reconnect if shutdown was initiated by peer or library
             if (e.Initiator == ShutdownInitiator.Peer ||
                 e.Initiator == ShutdownInitiator.Library)
             {
@@ -212,18 +230,16 @@ namespace AuthService.Infrastructure.Messaging
         }
 
         /// <summary>
-        /// Handles the CallbackException event from RabbitMQ. If the exception is a network error, it will attempt to reconnect.
+        /// Handles the CallbackException event. Reconnects only on network-related errors.
         /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
-        /// <returns> A task that represents the asynchronous operation.</returns>
         private async Task OnCallbackExceptionAsync(object sender, CallbackExceptionEventArgs e)
         {
             if (_disposed) return;
 
-            _logger.LogWarning($"CallbackException: {e.Exception.Message}");
+            _logger.LogWarning(
+                "RabbitMQ callback exception: {ExceptionMessage}",  
+                e.Exception.Message);
 
-            // only attempt to reconnect if it's a network error
             if (e.Exception is SocketException)
             {
                 await SafeReconnectAsync("CallbackException");
@@ -231,35 +247,36 @@ namespace AuthService.Infrastructure.Messaging
         }
 
         /// <summary>
-        /// Handles the ConnectionBlocked event from RabbitMQ. This can occur when the server is under resource pressure. In this case, we log the reason but do not attempt to reconnect immediately, as the server may recover on its own.
+        /// Handles the ConnectionBlocked event. Logs the reason but does not reconnect,
+        /// as the server may recover on its own under resource pressure.
         /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
-        /// <returns> A task that represents the asynchronous operation.</returns>
         private Task OnConnectionBlockedAsync(object sender, ConnectionBlockedEventArgs e)
         {
-            _logger.LogWarning($"Connection Blocked: {e.Reason}");
+            _logger.LogWarning(
+                "RabbitMQ connection blocked: {Reason}", 
+                e.Reason);
 
-            // do not attempt to reconnect here
             return Task.CompletedTask;
         }
 
         /// <summary>
-        /// Safely attempts to reconnect to RabbitMQ, ensuring that we do not attempt to reconnect if the object has been disposed. This method is called from the event handlers when a connection issue is detected.
+        /// Safely attempts to reconnect, respecting application shutdown state.
         /// </summary>
-        /// <param name="reason"></param>
-        /// <returns> A task that represents the asynchronous operation.</returns>
         private async Task SafeReconnectAsync(string reason)
         {
             if (_disposed) return;
 
-            _logger.LogWarning($"Attempting to reconnect ({reason})...");
+            _logger.LogWarning(
+                "Attempting to reconnect to RabbitMQ. Reason: {Reason}",
+                reason);
 
-            await TryConnectAsync();
+            //  Pass the app stopping token so reconnection is cancelled on shutdown
+            await TryConnectAsync(_appStopping);
         }
 
         /// <summary>
-        /// Disposes the RabbitConnection, closing the connection to RabbitMQ and unsubscribing from events. This method is idempotent and can be called multiple times without throwing exceptions.
+        /// Disposes the RabbitConnection, unsubscribing from events and closing the connection.
+        /// This method is idempotent.
         /// </summary>
         public void Dispose()
         {
@@ -267,13 +284,26 @@ namespace AuthService.Infrastructure.Messaging
 
             _disposed = true;
 
-            try
+            // Always unsubscribe before disposing to avoid callbacks firing
+            // on a half-torn-down object.
+            if (_connection != null)
             {
-                _connection?.Dispose();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error closing connection");
+                try
+                {
+                    _connection.ConnectionShutdownAsync -= OnConnectionShutdownAsync;
+                    _connection.CallbackExceptionAsync -= OnCallbackExceptionAsync;
+                    _connection.ConnectionBlockedAsync -= OnConnectionBlockedAsync;
+                }
+                catch { /* swallow */ }
+
+                try
+                {
+                    _connection.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error closing RabbitMQ connection");
+                }
             }
         }
     }

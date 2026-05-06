@@ -11,6 +11,6 @@ namespace AuthService.Infrastructure.Messaging
 
         Task<bool> TryConnectAsync(CancellationToken cancellationToken = default);
 
-        Task<IChannel> CreateChannelAsync();
+        Task<IChannel> CreateChannelAsync(CancellationToken cancellationToken = default);
     }
 }

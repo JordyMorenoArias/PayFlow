@@ -1,4 +1,6 @@
 ﻿using AuthService.Application.Interfaces.Repositories;
+using AuthService.Application.Interfaces.Services;
+using AuthService.Infrastructure.Authentication;
 using AuthService.Infrastructure.Data;
 using AuthService.Infrastructure.Messaging;
 using AuthService.Infrastructure.Repositories;
@@ -42,6 +44,9 @@ namespace AuthService.Infrastructure
 
             // Register repositories, if any
             services.AddScoped<IAuthUserRepository, AuthUserRepository>();
+
+            // Authentication services
+            services.AddSingleton<IJwtService, JwtService>();
 
             return services;
         }

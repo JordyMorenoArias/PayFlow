@@ -10,7 +10,7 @@
         public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
         public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.Now;
 
-        private AuthUser() { } // EF Core
+        private AuthUser() { }
 
         public AuthUser(string email, string passwordHash)
         {
